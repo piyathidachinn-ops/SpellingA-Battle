@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-select=none">
+    <title>Thai Spelling Multiplayer Battle</title>
+    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root { 
+            --primary: #6C5CE7; 
+            --success: #00B894; 
+            --error: #FF7675; 
+            --bg: #F0F3F7; 
+            --blue-active: #FF9F43;
+            --cell-size: 110px;
+        }
+        * { box-sizing: border-box; font-family: 'Sarabun', sans-serif; -webkit-tap-highlight-color: transparent; }
+        body { background: var(--bg); margin: 0; overflow: hidden; touch-action: none; text-align: center; }
+        
+        .screen { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 10; padding: 20px; }
+        .hidden { display: none !important; }
+
+        /* Game UI & Grid */
+        #game-area { position: relative; display: inline-block; margin-top: 40px; }
+        #grid { display: grid; gap: 15px; transition: opacity 0.3s, transform 0.3s; z-index: 5; position: relative; }
+        .cell { 
+            width: var(--cell-size); height: var(--cell-size); 
+            background: white; border-radius: 25px; 
+            display: flex; align-items: center; justify-content: center; 
+            font-size: 2.5rem; font-weight: bold; 
+            box-shadow: 0 8px 0 #ddd; cursor: pointer; 
+            border: 4px solid transparent; touch-action: none;
+        }
+        .cell.active { background: var(--blue-active); color: white; border-color: #e67e22; transform: translateY(4px); box-shadow: 0 4px 0 #e67e22; }
+
+        /* SVG Line */
+        #line-svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; transition: opacity 0.2s; }
+        #line-path { fill: none; stroke: var(--blue-active); stroke-width: 12; stroke-linecap: round; stroke-linejoin: round; transition: stroke 0.2s; }
+
+        /* Animations */
+        .fade-out { opacity: 0; transform: scale(0.9); pointer-events: none; }
+
+        /* Other UI */
+        #timer-bar { position: fixed; top: 0; left: 0; height: 10px; background: var(--primary); width: 100%; transition: width 1s linear; z-index: 100; }
+        .rank-list { width: 100%; max-width: 400px; margin-top: 20px; overflow-y: auto; max-height: 50vh; }
+        .rank-card { background: white; padding: 15px; margin-bottom: 10px; border-radius: 15px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        
+        button { padding: 15px 40px; border-radius: 30px; background: var(--success); color: white; border: none; font-size: 1.2rem; font-weight: bold; cursor: pointer; box-shadow: 0 5px 0 #009475; margin: 5px; }
+        button:active { transform: translateY(3px); box-shadow: 0 2px 0 #009475; }
+        .btn-reset { background: var(--error); box-shadow: 0 5px 0 #d63031; }
+
+        input { padding: 12px; border-radius: 10px; border: 2px solid #ddd; margin: 15px; font-size: 1.1rem; width: 80%; max-width: 300px; }
+    </style>
+</head>
+<body>
+
+    <div id="timer-bar"></div>
+
+    <div id="lobby-screen" class="screen">
+        <h1 style="color:var(--primary);">🎮 ประสมคำประลองยุทธ์</h1>
+        <div id="qrcode-container" style="background:white; padding:15px; border-radius:15px; margin-bottom:10px;">
+            <img id="qr-img" src="" alt="QR Code" style="width:150px;">
+        </div>
+        <input type="text" id="player-name" placeholder="ระบุชื่อผู้เล่น..." maxlength="12">
+        <button onclick="joinGame()">เข้าสู่สนามแข่ง!</button>
+        <p id="player-count" style="margin-top:20px; color:#666;">รอผู้เล่นคนอื่น...</p>
+    </div>
+
+    <div id="game-screen" class="screen hidden">
+        <div style="font-size: 1.4rem; font-weight: bold;">แต้ม: <span id="live-score" style="color:var(--primary)">0</span> | ⏳ <span id="timer-text">60</span></div>
+        
+        <div id="game-area" class="game-area">
+            <svg id="line-svg"><path id="line-path" d=""/></svg>
+            <div id="grid"></div>
+        </div>
+        <p style="margin-top:30px; color:#666; font-weight: bold; font-size: 1.2rem;">จงประสมคำจากตัวอักษรที่เห็น!</p>
+    </div>
+
+    <div id="dash-screen" class="screen hidden" style="justify-content: flex-start; padding-top: 60px; overflow-y: auto;">
+        <h1 style="color:var(--primary)">🏆 ตารางคะแนน</h1>
+        <div id="rank-container" class="rank-list"></div>
+        <div style="margin-top: 20px;">
+            <button id="reset-room-btn" class="btn-reset">ล้างห้องและเริ่มใหม่</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getDatabase, ref, set, update, remove, onValue } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyBCAQ419Q9U77SVOiTeC7_jfyfoDv258BE",
+            authDomain: "spellinga-605bc.firebaseapp.com",
+            databaseURL: "https://spellinga-605bc-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "spellinga-605bc",
+            storageBucket: "spellinga-605bc.firebasestorage.app",
+            messagingSenderId: "976514389506",
+            appId: "1:976514389506:web:5cb312d0f31eaed7a1f91b",
+            measurementId: "G-HYNV3MV2N2"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+        const roomId = "room_1"; 
+        
+        let myName = "";
+        let myScore = 0;
+        let myHistory = [];
+        let timeLeft = 60;
+        let gameActive = false;
+        
+        let selectedPath = [];
+        let isDragging = false;
+        let currentTarget = "";
+        const vocabulary = ["กา", "ตา", "ทา", "นา", "ปู", "งู", "ดู", "หู", "ดี", "ตี", "มา", "ยา", "ฝา", "รี", "สี"];
+
+        window.onload = () => {
+            const currentUrl = window.location.href;
+            document.getElementById('qr-img').src = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(currentUrl)}`;
+        };
+
+        document.getElementById('reset-room-btn').onclick = async () => {
+            if(confirm("ล้างข้อมูลและเริ่มใหม่?")) {
+                await remove(ref(db, `rooms/${roomId}`));
+                location.reload();
+            }
+        };
+
+        onValue(ref(db, `rooms/${roomId}`), (snapshot) => {
+            if (!snapshot.exists() && gameActive) location.reload();
+        });
+
+        window.joinGame = () => {
+            const nameInput = document.getElementById('player-name').value.trim();
+            if (!nameInput) return alert("กรุณาใส่ชื่อ!");
+            myName = nameInput;
+            set(ref(db, `rooms/${roomId}/players/${myName}`), { score: 0, history: ["เริ่มเกม"], lastActive: Date.now() });
+            document.getElementById('lobby-screen').classList.add('hidden');
+            document.getElementById('game-screen').classList.remove('hidden');
+            gameActive = true;
+            initRound();
+            startCountdown();
+            setupGlobalListeners();
+        };
+
+        function startCountdown() {
+            const timerBar = document.getElementById('timer-bar');
+            const timerText = document.getElementById('timer-text');
+            const timer = setInterval(() => {
+                if(!gameActive) { clearInterval(timer); return; }
+                timeLeft--;
+                timerText.innerText = timeLeft;
+                timerBar.style.width = (timeLeft / 60 * 100) + "%";
+                if (timeLeft <= 0) { clearInterval(timer); endGame(); }
+            }, 1000);
+        }
+
+        function initRound() {
+            if (!gameActive) return;
+            // สุ่มคำเป้าหมายไว้เบื้องหลัง (ผู้เล่นจะไม่เห็นคำนี้)
+            currentTarget = vocabulary[Math.floor(Math.random() * vocabulary.length)];
+            
+            const grid = document.getElementById('grid');
+            grid.innerHTML = "";
+            grid.classList.remove('fade-out');
+            document.getElementById('line-svg').style.opacity = "1";
+            
+            const chars = currentTarget.split('');
+            const colCount = Math.ceil(Math.sqrt(chars.length));
+            grid.style.gridTemplateColumns = `repeat(${colCount}, var(--cell-size))`;
+
+            [...chars].sort(() => Math.random() - 0.5).forEach(char => {
+                const cell = document.createElement('div');
+                cell.className = 'cell';
+                cell.innerText = char;
+                cell.dataset.char = char;
+                cell.addEventListener('pointerdown', e => {
+                    e.preventDefault();
+                    isDragging = true;
+                    handleHover(cell);
+                });
+                cell.addEventListener('pointerenter', () => { if (isDragging) handleHover(cell); });
+                grid.appendChild(cell);
+            });
+        }
+
+        function handleHover(cell) {
+            if (!selectedPath.includes(cell)) {
+                cell.classList.add('active');
+                selectedPath.push(cell);
+                updateLine();
+            }
+        }
+
+        function updateLine() {
+            const linePath = document.getElementById('line-path');
+            if (selectedPath.length < 1) { linePath.setAttribute('d', ''); return; }
+            let d = "";
+            selectedPath.forEach((cell, index) => {
+                const r = cell.getBoundingClientRect();
+                const a = document.querySelector('.game-area').getBoundingClientRect();
+                const x = r.left + r.width / 2 - a.left;
+                const y = r.top + r.height / 2 - a.top;
+                d += (index === 0 ? "M " : " L ") + x + " " + y;
+            });
+            linePath.setAttribute('d', d);
+        }
+
+        function setupGlobalListeners() {
+            window.addEventListener('pointerup', () => {
+                if (isDragging) {
+                    isDragging = false;
+                    if (selectedPath.length > 0) validate();
+                }
+            });
+        }
+
+        function validate() {
+            const result = selectedPath.map(c => c.dataset.char).join('');
+            const grid = document.getElementById('grid');
+
+            if (result === currentTarget) {
+                myScore += 10;
+                myHistory.push(`✅ ${currentTarget}`);
+            } else {
+                myHistory.push(`❌ ผิด (${result})`);
+                document.getElementById('line-path').style.stroke = "var(--error)";
+            }
+
+            grid.classList.add('fade-out');
+            document.getElementById('line-svg').style.opacity = "0";
+            updateFirebase();
+
+            setTimeout(() => {
+                selectedPath = [];
+                updateLine();
+                document.getElementById('line-path').style.stroke = "var(--blue-active)";
+                initRound();
+            }, 400); 
+        }
+
+        function updateFirebase() {
+            document.getElementById('live-score').innerText = myScore;
+            update(ref(db, `rooms/${roomId}/players/${myName}`), { score: myScore, history: myHistory });
+        }
+
+        function endGame() {
+            gameActive = false;
+            document.getElementById('game-screen').classList.add('hidden');
+            document.getElementById('dash-screen').classList.remove('hidden');
+            renderRanking();
+        }
+
+        function renderRanking() {
+            const rankContainer = document.getElementById('rank-container');
+            onValue(ref(db, `rooms/${roomId}/players`), (snapshot) => {
+                const data = snapshot.val();
+                if (!data) return;
+                const sorted = Object.entries(data).sort((a, b) => b[1].score - a[1].score);
+                rankContainer.innerHTML = sorted.map(([name, info], index) => `
+                    <div class="rank-card">
+                        <span><b>${index + 1}.</b> ${name}</span>
+                        <span style="color:var(--primary); font-weight:bold;">${info.score} แต้ม</span>
+                    </div>
+                `).join('');
+            });
+        }
+
+        onValue(ref(db, `rooms/${roomId}/players`), (snapshot) => {
+            const data = snapshot.val();
+            const count = data ? Object.keys(data).length : 0;
+            document.getElementById('player-count').innerText = `ผู้เล่นในห้อง: ${count} คน`;
+        });
+    </script>
+</body>
+</html>
